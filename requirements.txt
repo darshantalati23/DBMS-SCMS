@@ -1,0 +1,7 @@
+# ── Runtime dependencies ────────────────────────────────────────────────────
+psycopg2-binary>=2.9        # PostgreSQL adapter (binary wheel — no libpq build needed)
+rich>=13.0                  # Terminal formatting (tables, panels, syntax highlighting)
+prompt_toolkit>=3.0         # Interactive REPL with history, autocomplete, key-bindings
+
+# ── Testing dependencies ─────────────────────────────────────────────────────
+pytest>=8.0                 # Test runner and fixture engine

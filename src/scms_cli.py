@@ -69,11 +69,12 @@ from prompt_toolkit.formatted_text import HTML
 SCHEMA = "scms"
 
 SCMS_TABLES = [
-    "audit_log", "batch", "customer", "inventory", "inventory_allocation",
+    "audit_log", "batch", "customer", "delivery_event", "delivery_tracking",
+    "inter_warehouse_transfer", "inventory", "inventory_allocation",
     "inventory_movement_log", "po_item", "product", "product_category",
     "purchase_order", "reorder_alert", "return_item", "return_request",
     "sales_order", "shipment", "shipment_item", "so_item", "staff",
-    "supplier", "supplies", "warehouse", "warehouse_zone",
+    "supplier", "supplies", "transfer_item", "warehouse", "warehouse_zone",
 ]
 
 SQL_KEYWORDS = [
@@ -680,6 +681,40 @@ def build_completer():
 def repl(conn, host, port, dbname, user):
     print_banner(host, port, dbname, user)
 
+    # ── Non-TTY / pipe mode (used by subprocess tests and CI) ────────────────
+    # When stdin is not a real terminal (e.g. piped in tests), prompt_toolkit's
+    # Win32Output crashes because there is no console screen buffer attached.
+    # We detect this and fall back to a simple line-reading loop.
+    if not sys.stdin.isatty():
+        timing_on   = False
+        last_result = None
+        buffer      = []
+        try:
+            for line in sys.stdin:
+                line = line.rstrip("\n\r")
+                if not line.strip():
+                    continue
+                stripped = line.strip()
+                is_special = (
+                    stripped.startswith(".")
+                    or stripped.startswith("\\")
+                    or stripped.lower() in ("exit", "quit", "help")
+                )
+                if is_special:
+                    timing_on, last_result = dispatch(
+                        conn, stripped, timing_on, last_result)
+                    continue
+                buffer.append(line)
+                combined = "\n".join(buffer).strip()
+                if combined.rstrip().endswith(";"):
+                    timing_on, last_result = dispatch(
+                        conn, combined, timing_on, last_result)
+                    buffer.clear()
+        except (EOFError, KeyboardInterrupt):
+            pass
+        return
+
+    # ── Interactive TTY mode ──────────────────────────────────────────────────
     session = PromptSession(
         history=FileHistory(HISTORY_FILE),
         auto_suggest=AutoSuggestFromHistory(),

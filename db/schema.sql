@@ -92,9 +92,22 @@ CREATE TYPE alert_status_enum AS ENUM (
     'open', 'po_raised', 'dismissed'
 );
 
+-- Extended: transfer_in / transfer_out added for inter-warehouse movements
 CREATE TYPE movement_type_enum AS ENUM (
     'receipt', 'allocation', 'deallocation',
-    'dispatch', 'return', 'adjustment', 'write_off'
+    'dispatch', 'return', 'adjustment', 'write_off',
+    'transfer_in', 'transfer_out'
+);
+
+-- Transfer status lifecycle for inter-warehouse stock movements
+CREATE TYPE transfer_status_enum AS ENUM (
+    'requested', 'approved', 'picking', 'in_transit', 'received', 'cancelled'
+);
+
+-- Delivery event types for cold chain / real-time tracking
+CREATE TYPE delivery_event_type_enum AS ENUM (
+    'departed_warehouse', 'reached_checkpoint', 'out_for_delivery',
+    'delivered', 'failed_attempt', 'delay_reported', 'temperature_breach'
 );
 
 -- ============================================================
@@ -121,7 +134,7 @@ CREATE TABLE warehouse (
 
 CREATE TABLE staff (
     staff_id        SERIAL          PRIMARY KEY,
-    warehouse_id    INT,            -- nullable FK → warehouse
+    warehouse_id    INT,            -- nullable FK -> warehouse
     employee_code   VARCHAR(20)     NOT NULL UNIQUE,
     full_name       VARCHAR(150)    NOT NULL,
     role            staff_role_enum NOT NULL,
@@ -129,6 +142,7 @@ CREATE TABLE staff (
     phone           VARCHAR(20),
     is_active       BOOLEAN         NOT NULL DEFAULT TRUE,
     last_login      TIMESTAMP,
+    password_hash   VARCHAR(255),   -- authentication foundation (nullable)
 
     CONSTRAINT fk_staff_warehouse
         FOREIGN KEY (warehouse_id)
@@ -156,21 +170,20 @@ CREATE TABLE supplier (
     supplier_tier           supplier_tier_enum  NOT NULL DEFAULT 'approved',
     on_time_delivery_rate   NUMERIC(5,2),
     quality_rejection_rate  NUMERIC(5,2),
-    supplier_rating  NUMERIC(5,2)
-                            GENERATED ALWAYS AS (
-                                ROUND((on_time_delivery_rate * 0.6) + ((100 - quality_rejection_rate) * 0.4), 2)
-                            ) STORED,
+    supplier_rating         NUMERIC(5,2)
+                                GENERATED ALWAYS AS (
+                                    ROUND((on_time_delivery_rate * 0.6) + ((100 - quality_rejection_rate) * 0.4), 2)
+                                ) STORED,
     is_active               BOOLEAN             NOT NULL DEFAULT TRUE,
     created_at              TIMESTAMP           DEFAULT CURRENT_TIMESTAMP,
     updated_at              TIMESTAMP           DEFAULT CURRENT_TIMESTAMP
 );
 
-
 -- ============================================================
 --  SECTION 5 — PRODUCT CATALOG
 -- ============================================================
 
--- ── 5.1 PRODUCT_CATEGORY  [Strong Entity — Recursive] ───────
+-- 5.1 PRODUCT_CATEGORY  [Strong Entity — Recursive]
 
 CREATE TABLE product_category (
     category_id         SERIAL          PRIMARY KEY,
@@ -185,7 +198,7 @@ CREATE TABLE product_category (
         DEFERRABLE INITIALLY DEFERRED
 );
 
--- ── 5.2 PRODUCT  [Strong Entity] ────────────────────────────
+-- 5.2 PRODUCT  [Strong Entity]
 
 CREATE TABLE product (
     product_id          SERIAL          PRIMARY KEY,
@@ -199,6 +212,9 @@ CREATE TABLE product (
     reorder_point       INT             NOT NULL DEFAULT 0,
     reorder_quantity    INT             NOT NULL DEFAULT 0,
     weight_kg           NUMERIC(10,3),
+    -- Cold chain: storage temperature thresholds in Celsius (NULL = non-perishable)
+    min_temp_celsius    NUMERIC(5,2),
+    max_temp_celsius    NUMERIC(5,2),
     is_active           BOOLEAN         NOT NULL DEFAULT TRUE,
 
     CONSTRAINT fk_product_category
@@ -206,7 +222,7 @@ CREATE TABLE product (
         REFERENCES product_category (category_id)
 );
 
--- ── 5.3 SUPPLIES  [Associative Entity — M:N Supplier×Product]
+-- 5.3 SUPPLIES  [Associative Entity — M:N Supplier x Product]
 
 CREATE TABLE supplies (
     supplier_product_id     SERIAL          PRIMARY KEY,
@@ -230,7 +246,6 @@ CREATE TABLE supplies (
         UNIQUE (supplier_id, product_id, price_valid_from)
 );
 
-
 -- ============================================================
 --  SECTION 6 — WAREHOUSE ZONE  [Weak Entity — owner: Warehouse]
 -- ============================================================
@@ -242,6 +257,9 @@ CREATE TABLE warehouse_zone (
     zone_type           zone_type_enum  NOT NULL,
     capacity_units      INT,
     temperature_zone    VARCHAR(20),
+    -- Actual temperature thresholds for cold chain zone enforcement
+    min_temp_celsius    NUMERIC(5,2),
+    max_temp_celsius    NUMERIC(5,2),
     is_active           BOOLEAN         NOT NULL DEFAULT TRUE,
 
     CONSTRAINT fk_zone_warehouse
@@ -256,25 +274,62 @@ CREATE TABLE warehouse_zone (
 --  SECTION 7 — PROCUREMENT CHAIN
 -- ============================================================
 
--- ── 7.1 PURCHASE_ORDER  [Strong Entity] ─────────────────────
+-- 7.0 INTER_WAREHOUSE_TRANSFER [Strong Entity]
+--     Declared before purchase_order so PO can FK into it.
+--     Models stock movements between warehouses that don't involve a supplier.
+
+CREATE TABLE inter_warehouse_transfer (
+    transfer_id         SERIAL                  PRIMARY KEY,
+    transfer_number     VARCHAR(30)             NOT NULL UNIQUE,
+    source_warehouse_id INT                     NOT NULL,
+    dest_warehouse_id   INT                     NOT NULL,
+    requested_by        INT                     NOT NULL,
+    approved_by         INT,
+    transfer_status     transfer_status_enum    NOT NULL DEFAULT 'requested',
+    requested_at        TIMESTAMP               NOT NULL DEFAULT NOW(),
+    approved_at         TIMESTAMP,
+    expected_arrival    DATE,
+    actual_arrival      DATE,
+    notes               TEXT,
+
+    CONSTRAINT fk_transfer_source
+        FOREIGN KEY (source_warehouse_id)
+        REFERENCES warehouse (warehouse_id),
+    CONSTRAINT fk_transfer_dest
+        FOREIGN KEY (dest_warehouse_id)
+        REFERENCES warehouse (warehouse_id),
+    CONSTRAINT fk_transfer_requested_by
+        FOREIGN KEY (requested_by)
+        REFERENCES staff (staff_id),
+    CONSTRAINT fk_transfer_approved_by
+        FOREIGN KEY (approved_by)
+        REFERENCES staff (staff_id)
+        ON DELETE SET NULL,
+    CONSTRAINT chk_transfer_diff_warehouses
+        CHECK (source_warehouse_id <> dest_warehouse_id)
+);
+
+-- 7.1 PURCHASE_ORDER  [Strong Entity]
 
 CREATE TABLE purchase_order (
-    po_id                   SERIAL              PRIMARY KEY,
-    po_number               VARCHAR(30)         NOT NULL UNIQUE,
-    supplier_id             INT                 NOT NULL,
-    warehouse_id            INT                 NOT NULL,
-    created_by              INT                 NOT NULL,
-    approved_by             INT,
-    po_status               po_status_enum      NOT NULL DEFAULT 'draft',
-    order_date              DATE                NOT NULL DEFAULT CURRENT_DATE,
-    expected_delivery_date  DATE,
-    actual_delivery_date    DATE,
-    received_by             INT,
-    grn_status              grn_status_enum,
-    rejection_reason        TEXT,
-    payment_terms           VARCHAR(50),
-    payment_status          payment_status_enum NOT NULL DEFAULT 'unpaid',
-    total_amount            NUMERIC(14,2)       DEFAULT 0,
+    po_id                       SERIAL              PRIMARY KEY,
+    po_number                   VARCHAR(30)         NOT NULL UNIQUE,
+    supplier_id                 INT                 NOT NULL,
+    warehouse_id                INT                 NOT NULL,
+    created_by                  INT                 NOT NULL,
+    approved_by                 INT,
+    -- PO can be triggered by a transfer request (nullable link)
+    inter_warehouse_transfer_id INT,
+    po_status                   po_status_enum      NOT NULL DEFAULT 'draft',
+    order_date                  DATE                NOT NULL DEFAULT CURRENT_DATE,
+    expected_delivery_date      DATE,
+    actual_delivery_date        DATE,
+    received_by                 INT,
+    grn_status                  grn_status_enum,
+    rejection_reason            TEXT,
+    payment_terms               VARCHAR(50),
+    payment_status              payment_status_enum NOT NULL DEFAULT 'unpaid',
+    total_amount                NUMERIC(14,2)       DEFAULT 0,
 
     CONSTRAINT fk_po_supplier
         FOREIGN KEY (supplier_id)
@@ -290,10 +345,14 @@ CREATE TABLE purchase_order (
         REFERENCES staff (staff_id),
     CONSTRAINT fk_po_received_by
         FOREIGN KEY (received_by)
-        REFERENCES staff (staff_id)
+        REFERENCES staff (staff_id),
+    CONSTRAINT fk_po_transfer
+        FOREIGN KEY (inter_warehouse_transfer_id)
+        REFERENCES inter_warehouse_transfer (transfer_id)
+        ON DELETE SET NULL
 );
 
--- ── 7.2 PO_ITEM  [Weak Entity — owner: Purchase_Order] ──────
+-- 7.2 PO_ITEM  [Weak Entity — owner: Purchase_Order]
 
 CREATE TABLE po_item (
     po_item_id          SERIAL              PRIMARY KEY,
@@ -325,7 +384,7 @@ CREATE TABLE po_item (
         CHECK (received_quantity <= ordered_quantity)
 );
 
--- ── 7.3 BATCH  [Strong Entity] ───────────────────────────────
+-- 7.3 BATCH  [Strong Entity]
 
 CREATE TABLE batch (
     batch_id            SERIAL              PRIMARY KEY,
@@ -354,11 +413,40 @@ CREATE TABLE batch (
         CHECK (expiry_date >= received_date)
 );
 
+-- 7.4 TRANSFER_ITEM  [Weak Entity — owner: Inter_Warehouse_Transfer]
+
+CREATE TABLE transfer_item (
+    transfer_item_id    SERIAL  PRIMARY KEY,
+    transfer_id         INT     NOT NULL,
+    product_id          INT     NOT NULL,
+    batch_id            INT     NOT NULL,
+    requested_quantity  INT     NOT NULL CHECK (requested_quantity > 0),
+    dispatched_quantity INT     NOT NULL DEFAULT 0,
+    received_quantity   INT     NOT NULL DEFAULT 0,
+
+    CONSTRAINT fk_transfer_item_transfer
+        FOREIGN KEY (transfer_id)
+        REFERENCES inter_warehouse_transfer (transfer_id)
+        ON DELETE CASCADE,
+    CONSTRAINT fk_transfer_item_product
+        FOREIGN KEY (product_id)
+        REFERENCES product (product_id),
+    CONSTRAINT fk_transfer_item_batch
+        FOREIGN KEY (batch_id)
+        REFERENCES batch (batch_id),
+    CONSTRAINT uq_transfer_item
+        UNIQUE (transfer_id, product_id, batch_id),
+    CONSTRAINT chk_dispatched_lte_requested
+        CHECK (dispatched_quantity <= requested_quantity),
+    CONSTRAINT chk_received_lte_dispatched
+        CHECK (received_quantity <= dispatched_quantity)
+);
+
 -- ============================================================
 --  SECTION 8 — SALES CHAIN
 -- ============================================================
 
--- ── 8.1 CUSTOMER  [Strong Entity] ───────────────────────────
+-- 8.1 CUSTOMER  [Strong Entity]
 
 CREATE TABLE customer (
     customer_id         SERIAL              PRIMARY KEY,
@@ -373,10 +461,17 @@ CREATE TABLE customer (
     credit_limit        NUMERIC(14,2)       NOT NULL DEFAULT 0,
     is_credit_hold      BOOLEAN             NOT NULL DEFAULT FALSE,
     payment_terms_days  INT,
-    kyc_verified        BOOLEAN             NOT NULL DEFAULT FALSE
+    kyc_verified        BOOLEAN             NOT NULL DEFAULT FALSE,
+    -- If this customer IS a warehouse hub ordering from another hub
+    linked_warehouse_id INT,
+
+    CONSTRAINT fk_customer_linked_warehouse
+        FOREIGN KEY (linked_warehouse_id)
+        REFERENCES warehouse (warehouse_id)
+        ON DELETE SET NULL
 );
 
--- ── 8.2 SALES_ORDER  [Strong Entity] ────────────────────────
+-- 8.2 SALES_ORDER  [Strong Entity]
 
 CREATE TABLE sales_order (
     so_id                   SERIAL              PRIMARY KEY,
@@ -406,21 +501,23 @@ CREATE TABLE sales_order (
         REFERENCES staff (staff_id)
 );
 
--- ── 8.3 SO_ITEM  [Weak Entity — owner: Sales_Order] ─────────
+-- 8.3 SO_ITEM  [Weak Entity — owner: Sales_Order]
 
 CREATE TABLE so_item (
-    so_item_id          SERIAL              PRIMARY KEY,
-    so_id               INT                 NOT NULL,
-    product_id          INT                 NOT NULL,
-    ordered_quantity    INT                 NOT NULL CHECK (ordered_quantity > 0),
-    allocated_quantity  INT                 NOT NULL DEFAULT 0,
-    picked_quantity     INT                 NOT NULL DEFAULT 0,
-    shipped_quantity    INT                 NOT NULL DEFAULT 0,
-    unit_price          NUMERIC(14,2)       NOT NULL,
-    line_total          NUMERIC(14,2)
-                            GENERATED ALWAYS AS
-                            (ordered_quantity * unit_price) STORED,
-    item_status         item_status_so_enum NOT NULL DEFAULT 'pending',
+    so_item_id              SERIAL              PRIMARY KEY,
+    so_id                   INT                 NOT NULL,
+    product_id              INT                 NOT NULL,
+    -- Multi-warehouse fulfillment: which warehouse fulfils this specific line
+    fulfillment_warehouse_id INT,
+    ordered_quantity        INT                 NOT NULL CHECK (ordered_quantity > 0),
+    allocated_quantity      INT                 NOT NULL DEFAULT 0,
+    picked_quantity         INT                 NOT NULL DEFAULT 0,
+    shipped_quantity        INT                 NOT NULL DEFAULT 0,
+    unit_price              NUMERIC(14,2)       NOT NULL,
+    line_total              NUMERIC(14,2)
+                                GENERATED ALWAYS AS
+                                (ordered_quantity * unit_price) STORED,
+    item_status             item_status_so_enum NOT NULL DEFAULT 'pending',
 
     CONSTRAINT fk_so_item_so
         FOREIGN KEY (so_id)
@@ -429,6 +526,10 @@ CREATE TABLE so_item (
     CONSTRAINT fk_so_item_product
         FOREIGN KEY (product_id)
         REFERENCES product (product_id),
+    CONSTRAINT fk_so_item_fulfillment_wh
+        FOREIGN KEY (fulfillment_warehouse_id)
+        REFERENCES warehouse (warehouse_id)
+        ON DELETE SET NULL,
     CONSTRAINT uq_so_item
         UNIQUE (so_id, product_id),
     CONSTRAINT chk_allocated_lte_ordered
@@ -443,7 +544,7 @@ CREATE TABLE so_item (
 --  SECTION 9 — INVENTORY
 -- ============================================================
 
--- ── 9.1 INVENTORY  [Ternary Associative — Product×Batch×Zone]
+-- 9.1 INVENTORY  [Ternary Associative — Product x Batch x Zone]
 
 CREATE TABLE inventory (
     inventory_id        SERIAL          PRIMARY KEY,
@@ -474,12 +575,14 @@ CREATE TABLE inventory (
         CHECK (quantity_reserved <= quantity_on_hand)
 );
 
--- ── 9.2 INVENTORY_ALLOCATION  [Associative — SO_Item×Inventory]
+-- 9.2 INVENTORY_ALLOCATION  [Associative — SO_Item x Inventory]
 
 CREATE TABLE inventory_allocation (
     allocation_id       SERIAL                  PRIMARY KEY,
     so_item_id          INT                     NOT NULL,
     inventory_id        INT                     NOT NULL,
+    -- Explicit source warehouse for multi-warehouse allocation tracing
+    source_warehouse_id INT,
     allocated_quantity  INT                     NOT NULL CHECK (allocated_quantity > 0),
     allocation_method   allocation_method_enum  NOT NULL DEFAULT 'FEFO',
     allocated_at        TIMESTAMP               NOT NULL DEFAULT NOW(),
@@ -491,6 +594,10 @@ CREATE TABLE inventory_allocation (
     CONSTRAINT fk_alloc_inventory
         FOREIGN KEY (inventory_id)
         REFERENCES inventory (inventory_id),
+    CONSTRAINT fk_alloc_source_warehouse
+        FOREIGN KEY (source_warehouse_id)
+        REFERENCES warehouse (warehouse_id)
+        ON DELETE SET NULL,
     CONSTRAINT fk_alloc_staff
         FOREIGN KEY (allocated_by)
         REFERENCES staff (staff_id)
@@ -501,12 +608,14 @@ CREATE TABLE inventory_allocation (
 --  SECTION 10 — LOGISTICS
 -- ============================================================
 
--- ── 10.1 SHIPMENT  [Strong Entity] ──────────────────────────
+-- 10.1 SHIPMENT  [Strong Entity]
 
 CREATE TABLE shipment (
     shipment_id             SERIAL                  PRIMARY KEY,
     shipment_number         VARCHAR(30)             NOT NULL UNIQUE,
     origin_warehouse_id     INT                     NOT NULL,
+    -- Populated when shipment is warehouse-to-warehouse (transfer)
+    destination_warehouse_id INT,
     vehicle_registration    VARCHAR(20),
     carrier_name            VARCHAR(100),
     driver_name             VARCHAR(100),
@@ -519,12 +628,16 @@ CREATE TABLE shipment (
     total_volume_cubic_m    NUMERIC(10,3),
     freight_cost            NUMERIC(14,2),
 
-    CONSTRAINT fk_shipment_warehouse
+    CONSTRAINT fk_shipment_origin_warehouse
         FOREIGN KEY (origin_warehouse_id)
+        REFERENCES warehouse (warehouse_id),
+    CONSTRAINT fk_shipment_dest_warehouse
+        FOREIGN KEY (destination_warehouse_id)
         REFERENCES warehouse (warehouse_id)
+        ON DELETE SET NULL
 );
 
--- ── 10.2 SHIPMENT_ITEM  [Weak Entity — owner: Shipment] ─────
+-- 10.2 SHIPMENT_ITEM  [Weak Entity — owner: Shipment]
 
 CREATE TABLE shipment_item (
     shipment_item_id    SERIAL  PRIMARY KEY,
@@ -543,11 +656,59 @@ CREATE TABLE shipment_item (
         UNIQUE (shipment_id, so_item_id)
 );
 
+-- 10.3 DELIVERY_TRACKING  [Real-time header — one per shipment]
+--      Stores the live GPS position and temperature sensor reading.
+--      Separate from delivery_event so the "current state" is a single-row lookup.
+
+CREATE TABLE delivery_tracking (
+    tracking_id             SERIAL          PRIMARY KEY,
+    shipment_id             INT             NOT NULL UNIQUE,
+    current_lat             NUMERIC(10,7),
+    current_lng             NUMERIC(10,7),
+    current_location_label  VARCHAR(200),
+    last_updated_at         TIMESTAMP       NOT NULL DEFAULT NOW(),
+    -- Cold chain: current temperature reading from IoT sensor (Celsius)
+    current_temp_celsius    NUMERIC(5,2),
+    eta_updated             TIMESTAMP,
+
+    CONSTRAINT fk_tracking_shipment
+        FOREIGN KEY (shipment_id)
+        REFERENCES shipment (shipment_id)
+        ON DELETE CASCADE
+);
+
+-- 10.4 DELIVERY_EVENT  [Append-only event log per shipment]
+--      Every checkpoint, breach, delay, or delivery attempt creates a row.
+--      This is the audit trail for the logistics domain.
+
+CREATE TABLE delivery_event (
+    event_id            BIGSERIAL                   PRIMARY KEY,
+    shipment_id         INT                         NOT NULL,
+    event_type          delivery_event_type_enum    NOT NULL,
+    event_lat           NUMERIC(10,7),
+    event_lng           NUMERIC(10,7),
+    location_label      VARCHAR(200),
+    -- Temperature at time of event — critical for cold chain breach logging
+    temp_celsius        NUMERIC(5,2),
+    notes               TEXT,
+    recorded_at         TIMESTAMP                   NOT NULL DEFAULT NOW(),
+    recorded_by         INT,    -- staff or NULL if driver-app auto-logged
+
+    CONSTRAINT fk_delivery_event_shipment
+        FOREIGN KEY (shipment_id)
+        REFERENCES shipment (shipment_id)
+        ON DELETE CASCADE,
+    CONSTRAINT fk_delivery_event_staff
+        FOREIGN KEY (recorded_by)
+        REFERENCES staff (staff_id)
+        ON DELETE SET NULL
+);
+
 -- ============================================================
 --  SECTION 11 — RETURNS
 -- ============================================================
 
--- ── 11.1 RETURN_REQUEST  [Strong Entity] ────────────────────
+-- 11.1 RETURN_REQUEST  [Strong Entity]
 
 CREATE TABLE return_request (
     return_id       SERIAL              PRIMARY KEY,
@@ -570,7 +731,7 @@ CREATE TABLE return_request (
         ON DELETE SET NULL
 );
 
--- ── 11.2 RETURN_ITEM  [Weak Entity — owner: Return_Request] ─
+-- 11.2 RETURN_ITEM  [Weak Entity — owner: Return_Request]
 
 CREATE TABLE return_item (
     return_item_id              SERIAL                  PRIMARY KEY,
@@ -597,10 +758,10 @@ CREATE TABLE return_item (
 );
 
 -- ============================================================
---  SECTION 12 — LOG and ALERT TABLES
+--  SECTION 12 — LOG AND ALERT TABLES
 -- ============================================================
 
--- ── 12.1 REORDER_ALERT ──────────────────────────────────────
+-- 12.1 REORDER_ALERT
 
 CREATE TABLE reorder_alert (
     alert_id                SERIAL              PRIMARY KEY,
@@ -609,7 +770,7 @@ CREATE TABLE reorder_alert (
     preferred_supplier_id   INT,
     current_stock           INT                 NOT NULL,
     reorder_point           INT                 NOT NULL,
-    suggested_order_quantity INT                NOT NULL,
+    suggested_order_quantity INT               NOT NULL,
     alert_status            alert_status_enum   NOT NULL DEFAULT 'open',
     triggered_at            TIMESTAMP           NOT NULL DEFAULT NOW(),
 
@@ -625,7 +786,7 @@ CREATE TABLE reorder_alert (
         ON DELETE SET NULL
 );
 
--- ── 12.2 AUDIT_LOG ──────────────────────────────────────────
+-- 12.2 AUDIT_LOG
 
 CREATE TABLE audit_log (
     log_id          BIGSERIAL               PRIMARY KEY,
@@ -644,7 +805,10 @@ CREATE TABLE audit_log (
         ON DELETE SET NULL
 );
 
--- ── 12.3 INVENTORY_MOVEMENT_LOG ─────────────────────────────
+-- 12.3 INVENTORY_MOVEMENT_LOG
+--      Append-only ledger — every inventory change creates one row.
+--      Supports full historical stock reconstruction and compliance auditing.
+--      Now includes transfer_in / transfer_out movement types.
 
 CREATE TABLE inventory_movement_log (
     movement_id     BIGSERIAL               PRIMARY KEY,
