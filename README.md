@@ -2,7 +2,7 @@
 
 ### Meet the Makers
 
-Build by students at Dhirubhai Ambani University (formerly DA-IICT):
+Build by students of Dhirubhai Ambani University (formerly DA-IICT):
 
 - Aaryan Modi (202401435)
 - Darshan Talati (202401046)
