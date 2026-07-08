@@ -2,7 +2,7 @@
 
 ### Meet the Makers
 
-Build by students at Dhirubhai Ambani University (formerly DA-IICT)
+Build by students at Dhirubhai Ambani University (formerly DA-IICT):
 
 - Aaryan Modi (202401435)
 - Darshan Talati (202401046)
@@ -65,3 +65,45 @@ Python is secondary in this architecture. It serves two narrow, utilitarian purp
 We built a lightweight REPL CLI (`src/scms_cli.py`) using `prompt_toolkit` to execute queries and visualize the schema. There is no ORM. The CLI merely passes raw SQL to PostgreSQL and renders the results.
 
 The test suite (`pytest`) is where the Python layer shines, proving the database's resilience. Tests are isolated using transaction `SAVEPOINT`s, ensuring no data pollution. The results are decisive: 21/21 tests passing in under 5 seconds, confirming that the database flawlessly rejects invalid operations and executes complex workflows perfectly. (See `docs/tests_summary.md` for a comprehensive breakdown of the test suite and its impact.)
+
+### LLM Integration (Text-to-SQL)
+
+The CLI includes a native `.ask` command powered by Google's Gemini Flash Lite. By dynamically reading the 26-table schema as context, the LLM converts natural language questions directly into executable PostgreSQL, allowing users to query complex supply chain metrics without writing SQL.
+
+---
+
+## Quick Start & Installation
+
+**1. Set your environment variables (PowerShell)**
+
+```powershell
+$env:PGHOST="localhost"
+$env:PGPORT="5432"
+$env:PGDATABASE="scms_db"
+$env:PGUSER="postgres"
+$env:PGPASSWORD="your_db_password"
+$env:GEMINI_API_KEY="your_gemini_api_key"  # Optional: only required for the .ask command
+```
+
+**2. Install Python Dependencies**
+
+```powershell
+pip install -r requirements.txt
+```
+
+**3. Initialize Database and Seed Data**
+
+```powershell
+psql -U postgres -d scms_db -f "db/schema.sql"
+psql -U postgres -d scms_db -f "db/seed.sql"
+```
+
+**4. Run Tests & Launch CLI**
+
+```powershell
+# Run the 21-test integration suite
+python -m pytest tests/ -v
+
+# Launch the interactive REPL
+python src/scms_cli.py
+```

@@ -11,17 +11,18 @@ Usage:
 Special commands (type these at the prompt):
     .tables            — list all tables in the scms schema
     .schema            — show schema summary (table + column count)
-    \d <table>         — describe a table (columns, types, constraints)
-    \di <table>        — show indexes on a table
-    \df                — list all functions/procedures in scms schema
-    \dv                — list all views in scms schema
+    \\d <table>         — describe a table (columns, types, constraints)
+    \\di <table>        — show indexes on a table
+    \\df                — list all functions/procedures in scms schema
+    \\dv                — list all views in scms schema
     .enums             — list all custom ENUM types and their values
     .search <keyword>  — search table/column names for a keyword
     .export <file>     — export last query result to a CSV file
+    .ask <query>       — use Gemini Flash Lite to generate SQL from English
     .timing on/off     — toggle query execution time display
     .clear             — clear the terminal screen
     .help              — show this help
-    exit / quit / \q   — exit the CLI
+    exit / quit / \\q   — exit the CLI
 """
 
 import argparse
@@ -90,7 +91,7 @@ SQL_KEYWORDS = [
 SPECIAL_COMMANDS = [
     ".tables", ".schema", ".enums", ".help", ".clear",
     ".timing on", ".timing off",
-    r"\d ", r"\di ", r"\df", r"\dv", ".search ", ".export ",
+    r"\d ", r"\di ", r"\df", r"\dv", ".search ", ".export ", ".ask ",
     "exit", "quit", r"\q",
 ]
 
@@ -448,6 +449,65 @@ def cmd_search(conn, keyword: str):
         cname = f"[bold yellow]{c}[/bold yellow]" if kw in c.lower() else c
         tbl.add_row(tname, cname, d)
     console.print(tbl)
+
+def cmd_ask(conn, natural_query: str):
+    if not os.environ.get("GEMINI_API_KEY"):
+        console.print("[bold red]GEMINI_API_KEY environment variable is not set.[/bold red]")
+        console.print("Please set it in your terminal: [bold cyan]$env:GEMINI_API_KEY=\"your_key\"[/bold cyan]")
+        return None
+
+    try:
+        from google import genai
+        client = genai.Client()
+    except Exception as e:
+        console.print(f"[bold red]Failed to initialize Gemini Client: {e}[/bold red]")
+        console.print("[dim]Make sure you ran: pip install google-genai[/dim]")
+        return None
+        
+    schema_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'db', 'schema.sql')
+    try:
+        with open(schema_path, 'r', encoding='utf-8') as f:
+            schema_content = f.read()
+    except Exception as e:
+        console.print(f"[bold red]Could not read schema.sql: {e}[/bold red]")
+        return None
+        
+    prompt = f"""
+You are an expert PostgreSQL developer. Write a raw PostgreSQL query based on the user's natural language request.
+The database uses the 'scms' schema (already in search_path, do not prefix tables with scms.).
+Here is the complete schema context:
+```sql
+{schema_content}
+```
+User request: {natural_query}
+
+CRITICAL RULES:
+1. ONLY return the raw SQL query. Do not wrap it in markdown code blocks like ```sql. Do not add any explanation or comments.
+2. The query must end with a semicolon.
+3. Validate the request against the schema. If the request is impossible or lacks required columns, return a SELECT statement returning a single string column that explains why it's impossible.
+"""
+    console.print(f"[dim]Asking Gemini Flash Lite...[/dim]")
+    try:
+        response = client.models.generate_content(
+            model='gemini-2.5-flash-lite',
+            contents=prompt,
+        )
+        sql_query = response.text.strip()
+        if sql_query.startswith("```sql"):
+            sql_query = sql_query[6:]
+        if sql_query.startswith("```"):
+            sql_query = sql_query[3:]
+        if sql_query.endswith("```"):
+            sql_query = sql_query[:-3]
+        sql_query = sql_query.strip()
+        
+        console.print("[bold magenta]Gemini Generated SQL:[/bold magenta]")
+        console.print(f"[bold cyan]{sql_query}[/bold cyan]\n")
+        return sql_query
+    except Exception as e:
+        console.print(f"[bold red]Gemini API request failed: {e}[/bold red]")
+        return None
+
     console.print(f"[bold green]{len(rows)}[/bold green] match(es)")
 
 
@@ -471,10 +531,10 @@ def cmd_help():
     help_text = """
 [bold cyan].tables[/bold cyan]              List all tables in the scms schema
 [bold cyan].schema[/bold cyan]              Schema summary (columns, PK, FK per table)
-[bold cyan]\d <table>[/bold cyan]           Describe a table (columns + constraints)
-[bold cyan]\di <table>[/bold cyan]          Show indexes on a table
-[bold cyan]\df[/bold cyan]                  List functions/procedures
-[bold cyan]\dv[/bold cyan]                  List views
+[bold cyan]\\d <table>[/bold cyan]           Describe a table (columns + constraints)
+[bold cyan]\\di <table>[/bold cyan]          Show indexes on a table
+[bold cyan]\\df[/bold cyan]                  List functions/procedures
+[bold cyan]\\dv[/bold cyan]                  List views
 [bold cyan].enums[/bold cyan]               List all ENUM types and their values
 [bold cyan].search <keyword>[/bold cyan]    Search table/column names
 [bold cyan].export <file.csv>[/bold cyan]   Export last query result to CSV
@@ -625,6 +685,19 @@ def dispatch(conn, line: str, timing_on: bool, last_result):
             cmd_search(conn, keyword)
         else:
             console.print("[yellow]Usage: .search <keyword>[/yellow]")
+        return timing_on, last_result
+
+    # ── .ask <query> ──────────────────────────────────────────────────────
+    if stripped.startswith(".ask "):
+        query = stripped[5:].strip()
+        if query:
+            generated_sql = cmd_ask(conn, query)
+            if generated_sql:
+                result = run_query(conn, generated_sql, timing_on)
+                if result is not None:
+                    last_result = result
+        else:
+            console.print("[yellow]Usage: .ask <natural language query>[/yellow]")
         return timing_on, last_result
 
     # ── .export <file> ────────────────────────────────────────────────────
