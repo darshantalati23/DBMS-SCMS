@@ -1,19 +1,19 @@
 # SCMS: Supply Chain Management System
 
-### Builders
+### Meet the Makers
 
 Build by students at Dhirubhai Ambani University (formerly DA-IICT)
 
 - Aaryan Modi (202401435)
 - Darshan Talati (202401046)
-- Kavya Bhajwani (202401090)
+- Kavya Bhojwani (202401090)
 - Shlok Patel (202401156)
 
 ## The Core Philosophy and Impact
 
 Supply chain software is notoriously brittle. It appears that when business logic is scattered across microservices, REST APIs, and front-end state, data integrity often suffers. We suspect the root cause is a misplaced trust in the application layer.
 
-This project takes a contrarian, old-school approach: the **"Thick Database, Thin Client"** architecture.
+This project takes a contrarian, old-school approach: the _"Thick Database, Thin Client"_ architecture.
 
 The core idea? Make PostgreSQL the absolute arbiter of truth. We enforce every business rule, state transition, and referential guarantee directly within the database schema using constraints, triggers, and custom data types. The impact of this design is profound. By stripping the application layer of its validation responsibilities, we eliminate entire classes of bugs (like race conditions leading to negative inventory). The database becomes an impenetrable fortress. If a rule is violated, the database rejects the transaction outright, regardless of the client interacting with it. It’s a design that scales inherently and guarantees rock-solid data integrity under high concurrency.
 
