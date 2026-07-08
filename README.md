@@ -1,5 +1,14 @@
 # SCMS: Supply Chain Management System
 
+### Builders
+
+Build by students at Dhirubhai Ambani University (formerly DA-IICT)
+
+- Aaryan Modi (202401435)
+- Darshan Talati (202401046)
+- Kavya Bhajwani (202401090)
+- Shlok Patel (202401156)
+
 ## The Core Philosophy and Impact
 
 Supply chain software is notoriously brittle. It appears that when business logic is scattered across microservices, REST APIs, and front-end state, data integrity often suffers. We suspect the root cause is a misplaced trust in the application layer.
